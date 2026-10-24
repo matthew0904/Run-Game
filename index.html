@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>光线传感器灯泡</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #1a1a2e;
+    color: #eee;
+    font-family: "Segoe UI", sans-serif;
+    transition: background 0.3s;
+  }
+  .bulb-wrap { position: relative; width: 220px; height: 320px; }
+  /* 光晕 */
+  .glow {
+    position: absolute;
+    top: 40px; left: 50%;
+    width: 340px; height: 340px;
+    transform: translateX(-50%);
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,220,100,0.9) 0%, rgba(255,180,50,0.35) 40%, transparent 70%);
+    opacity: 0;
+    pointer-events: none;
+  }
+  /* 小人 emoji */
+  .person-emoji {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 180px;
+    line-height: 1;
+    z-index: 2;
+    user-select: none;
+    transition: filter 0.2s;
+  }
+  .panel {
+    margin-top: 30px;
+    text-align: center;
+  }
+  .value {
+    font-size: 42px;
+    font-weight: bold;
+    color: #ffd76a;
+    font-variant-numeric: tabular-nums;
+  }
+  .bar {
+    width: 300px; height: 10px;
+    background: #333;
+    border-radius: 5px;
+    margin: 12px auto;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #ffd76a, #ff9d2e);
+    transition: width 0.1s;
+  }
+  button {
+    margin-top: 14px;
+    padding: 10px 28px;
+    font-size: 16px;
+    border: none;
+    border-radius: 8px;
+    background: #ffd76a;
+    color: #1a1a2e;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  button:hover { background: #ffcf40; }
+  #status { margin-top: 10px; font-size: 14px; color: #888; }
+
+  /* "要被闪瞎了"提示文字：亮度<400 时显示，随亮度增大而增大 */
+  .flash-text {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #fff;
+    font-weight: 900;
+    white-space: nowrap;
+    text-shadow: 0 0 30px rgba(255,215,106,0.9), 0 0 60px rgba(255,150,50,0.6);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 10;
+    transition: opacity 0.15s;
+  }
+</style>
+</head>
+<body>
+
+<div class="flash-text" id="flashText">要被闪瞎了</div>
+
+<div class="bulb-wrap">
+  <div class="glow" id="glow"></div>
+  <div class="person-emoji" id="personEmoji">😎</div>
+</div>
+
+<div class="panel">
+  <div>传感器数值：<span class="value" id="val">--</span></div>
+  <div class="bar"><div class="bar-fill" id="barFill"></div></div>
+  <button id="connectBtn">连接 Arduino</button>
+  <div id="status">未连接</div>
+</div>
+
+<script>
+const glow = document.getElementById('glow');
+const personEmoji = document.getElementById('personEmoji');
+const valEl = document.getElementById('val');
+const barFill = document.getElementById('barFill');
+const statusEl = document.getElementById('status');
+const connectBtn = document.getElementById('connectBtn');
+const flashText = document.getElementById('flashText');
+
+const EMOJI_NORMAL = '😎'; // 正常
+const EMOJI_COVER  = '🙈'; // 捂眼睛
+
+function updateBulb(sensorValue) {
+  valEl.textContent = sensorValue;
+  barFill.style.width = (sensorValue / 1023 * 100) + '%';
+
+  // 反向映射：传感器越亮(值越大)，小人越暗
+  const brightness = 1 - sensorValue / 1023; // 0(暗) ~ 1(亮)
+
+  glow.style.opacity = brightness * 0.95;
+  personEmoji.style.filter =
+    `brightness(${0.4 + brightness * 0.6}) drop-shadow(0 0 ${50 * brightness}px rgba(255,215,106,${brightness}))`;
+
+  // 数值低于400：捂眼睛 + 显示"要被闪瞎了"，数值越小文字越大
+  if (sensorValue < 400) {
+    personEmoji.textContent = EMOJI_COVER;
+
+    const ratio = 1 - sensorValue / 400; // 0 ~ 1，数值越小 ratio 越大
+    const fontSize = 60 + ratio * 160; // 60px ~ 220px
+    flashText.style.fontSize = fontSize + 'px';
+    flashText.style.opacity = 0.3 + ratio * 0.7;
+    flashText.style.display = 'block';
+  } else {
+    personEmoji.textContent = EMOJI_NORMAL;
+
+    flashText.style.opacity = 0;
+    flashText.style.display = 'none';
+  }
+}
+
+async function connect() {
+  if (!('serial' in navigator)) {
+    statusEl.textContent = '当前浏览器不支持 Web Serial，请用 Chrome/Edge 并通过 localhost 或 https 打开';
+    return;
+  }
+  try {
+    const port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 9600 });
+    statusEl.textContent = '已连接，读取中…';
+    connectBtn.disabled = true;
+
+    const decoder = new TextDecoderStream();
+    port.readable.pipeTo(decoder.writable);
+    const reader = decoder.readable.getReader();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      let idx;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        const num = parseInt(line, 10);
+        if (!isNaN(num)) updateBulb(Math.min(1023, Math.max(0, num)));
+      }
+    }
+  } catch (err) {
+    statusEl.textContent = '连接失败：' + err.message;
+    connectBtn.disabled = false;
+  }
+}
+
+connectBtn.addEventListener('click', connect);
+
+// 演示模式：未连接时用鼠标移动模拟传感器（横向位置 = 传感器值）
+document.addEventListener('mousemove', (e) => {
+  if (connectBtn.disabled) return;
+  const fake = Math.round(e.clientX / window.innerWidth * 1023);
+  updateBulb(fake);
+});
+</script>
+</body>
+</html>
